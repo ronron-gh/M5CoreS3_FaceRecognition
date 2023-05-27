@@ -310,6 +310,13 @@ void setup() {
 
   camera_init();
 
+  // 顔認識のIDをFlashに保存するために、保存先のパーティションを設定
+  recognizer.set_partition(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "fr");
+  // Flashに保存された顔認識IDを消去
+  //recognizer.clear_id(true);
+  // Flashに顔認識IDがすでに保存されていれば読み込む
+  recognizer.set_ids_from_flash();
+
 }
 
 void loop() {
