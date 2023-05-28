@@ -11,15 +11,9 @@
                     /*<! 0: detect by one-stage which is less accurate but faster(without keypoints). */
 
 #include "face_recognition_tool.hpp"
-#include "face_recognition_112_v1_s16.hpp"
 #include "face_recognition_112_v1_s8.hpp"
-#define QUANT_TYPE 0 //if set to 1 => very large firmware, very slow, reboots when streaming...
 #define FACE_ID_SAVE_NUMBER 7
-
-
-#define LCD_WIDTH (320)
-#define LCD_HEIGHT  (240)
-#define LCD_BUF_SIZE (LCD_WIDTH*LCD_HEIGHT*2)
+//#define RECOGNITION_RGB888
 
 static int8_t is_enrolling = 0;
 FaceRecognition112V1S8 recognizer;
@@ -51,6 +45,7 @@ static camera_config_t camera_config = {
     .pixel_format = PIXFORMAT_RGB565,
     //.pixel_format = PIXFORMAT_JPEG,
     .frame_size   = FRAMESIZE_QVGA,   // QVGA(320x240)
+    //.frame_size   = FRAMESIZE_QQVGA,   // QQVGA(160x120)
     .jpeg_quality = 0,
     .fb_count     = 2,
     .fb_location  = CAMERA_FB_IN_PSRAM,
@@ -188,35 +183,54 @@ static void draw_face_boxes(fb_data_t *fb, std::list<dl::detect::result_t> *resu
     }
 }
 
+#ifdef RECOGNITION_RGB888
 static int run_face_recognition(fb_data_t *fb, fb_data_t *fb_lcd, std::list<dl::detect::result_t> *results)
+#else
+static int run_face_recognition(fb_data_t *fb_lcd, std::list<dl::detect::result_t> *results)
+#endif
 {
-    std::vector<int> landmarks = results->front().keypoint;
-    int id = -1;
+  std::vector<int> landmarks = results->front().keypoint;
+  int id = -1;
 
-    Tensor<uint8_t> tensor;
-    tensor.set_element((uint8_t *)fb->data).set_shape({fb->height, fb->width, 3}).set_auto_free(false);
+#ifdef RECOGNITION_RGB888
+  Tensor<uint8_t> tensor;
+  tensor.set_element((uint8_t *)fb->data).set_shape({fb->height, fb->width, 3}).set_auto_free(false);
+#else
+  std::vector<int> shape = {fb_lcd->height, fb_lcd->width, 3};
+#endif
 
-    int enrolled_count = recognizer.get_enrolled_id_num();
+  int enrolled_count = recognizer.get_enrolled_id_num();
 
-    if (enrolled_count < FACE_ID_SAVE_NUMBER && is_enrolling){
-        id = recognizer.enroll_id(tensor, landmarks, "", true);
-        log_i("Enrolled ID: %d", id);
-        rgb_printf(fb_lcd, FACE_COLOR_CYAN, "ID[%u]", id);
-        is_enrolling = 0;
-    }
+  if (enrolled_count < FACE_ID_SAVE_NUMBER && is_enrolling){
+  #ifdef RECOGNITION_RGB888
+    id = recognizer.enroll_id(tensor, landmarks, "", true);
+  #else
+    id = recognizer.enroll_id((uint16_t *)fb_lcd->data, shape, landmarks, "", true);
+  #endif
+    log_i("Enrolled ID: %d", id);
+    rgb_printf(fb_lcd, FACE_COLOR_CYAN, "ID[%u]", id);
+    is_enrolling = 0;
+  }
 
-    face_info_t recognize = recognizer.recognize(tensor, landmarks);
-    if(recognize.id >= 0){
-        rgb_printf(fb_lcd, FACE_COLOR_GREEN, "ID[%u]: %.2f", recognize.id, recognize.similarity);
-    } else {
-        rgb_print(fb_lcd, FACE_COLOR_RED, "Intruder Alert!");
-    }
-    return recognize.id;
+#ifdef RECOGNITION_RGB888
+  face_info_t recognize = recognizer.recognize(tensor, landmarks);
+#else
+  face_info_t recognize = recognizer.recognize((uint16_t *)fb_lcd->data, shape, landmarks);
+#endif
+  if(recognize.id >= 0){
+    rgb_printf(fb_lcd, FACE_COLOR_GREEN, "ID[%u]: %.2f", recognize.id, recognize.similarity);
+  } else {
+    rgb_print(fb_lcd, FACE_COLOR_RED, "Intruder Alert!");
+  }
+
+  return recognize.id;
 }
 
 esp_err_t camera_capture_and_face_recognition(){
+#ifdef RECOGNITION_RGB888
   size_t out_len, out_width, out_height;
   uint8_t *out_buf;
+#endif
   bool s;
   int face_id = 0;  
   
@@ -229,7 +243,7 @@ esp_err_t camera_capture_and_face_recognition(){
     return ESP_FAIL;
   }
 
-
+#ifdef RECOGNITION_RGB888
   out_len = fb->width * fb->height * 3;
   out_width = fb->width;
   out_height = fb->height;
@@ -253,6 +267,7 @@ esp_err_t camera_capture_and_face_recognition(){
   rfb.data = out_buf;
   rfb.bytes_per_pixel = 3;
   rfb.format = FB_BGR888;
+#endif
 
   // LCD表示用バッファ(RGB565)　※カメラキャプチャのバッファをそのまま使用
   fb_data_t rfbLcd;
@@ -265,23 +280,35 @@ esp_err_t camera_capture_and_face_recognition(){
 #if TWO_STAGE
   HumanFaceDetectMSR01 s1(0.1F, 0.5F, 10, 0.2F);
   HumanFaceDetectMNP01 s2(0.5F, 0.3F, 5);
+#ifdef RECOGNITION_RGB888
   std::list<dl::detect::result_t> &candidates = s1.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
   std::list<dl::detect::result_t> &results = s2.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3}, candidates);
 #else
+  std::list<dl::detect::result_t> &candidates = s1.infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3});
+  std::list<dl::detect::result_t> &results = s2.infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3}, candidates);
+#endif
+#else
   HumanFaceDetectMSR01 s1(0.3F, 0.5F, 10, 0.2F);
+#ifdef RECOGNITION_RGB888
   std::list<dl::detect::result_t> &results = s1.infer((uint8_t *)out_buf, {(int)out_height, (int)out_width, 3});
+#else
+  std::list<dl::detect::result_t> &results = s1.infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3});
 #endif
 
   if (results.size() > 0) {
+#ifdef RECOGNITION_RGB888
     face_id = run_face_recognition(&rfb, &rfbLcd, &results);
-
+#else
+    face_id = run_face_recognition(&rfbLcd, &results);
+#endif
     draw_face_boxes(&rfbLcd, &results, face_id);
   }
+#endif
 
   //replace this with your own function
   //process_image(fb->width, fb->height, fb->format, fb->buf, fb->len);
   M5.Display.startWrite();
-  M5.Display.setAddrWindow(0, 0, LCD_WIDTH, LCD_HEIGHT);
+  M5.Display.setAddrWindow(0, 0, fb->width, fb->height);
   M5.Display.writePixels((uint16_t*)fb->buf, int(fb->len / 2));
   M5.Display.endWrite();
   
@@ -290,8 +317,10 @@ esp_err_t camera_capture_and_face_recognition(){
 
   //return the frame buffer back to the driver for reuse
   esp_camera_fb_return(fb);
-  free(out_buf);
 
+#ifdef RECOGNITION_RGB888
+  free(out_buf);
+#endif
   //Serial.println("<heap size after fb return>");  
   //check_heap_free_size();
 
